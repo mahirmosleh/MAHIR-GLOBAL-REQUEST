@@ -661,7 +661,7 @@ class FC:
                                     cHSq(4, self.bot_uid, key, iv, self.region)
                                 )
                                 sock2.send(chsq_packet)
-                                time.sleep(0.3)
+                                time.sleep(2)
                                 with lock:
                                     console.print(f"[cyan][{self.bot_uid}] [{self.region}] cHSq Sent ✅[/cyan]")
                             except Exception as e:
