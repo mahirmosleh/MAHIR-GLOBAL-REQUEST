@@ -16,8 +16,8 @@ from xC4 import *
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-ADMIN_PASSWORD = "MAHIR"
-SECRET_KEY = "mahir_group_secret_2024"
+ADMIN_PASSWORD = os.environ.get("PANEL_PASSWORD", "mahir2024")
+SECRET_KEY = os.environ.get("SECRET_KEY", "mahir_group_secret_2024")
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
@@ -360,11 +360,15 @@ def auto_group_cycle_loop():
     প্রতি ১০ সেকেন্ডে:
       1. সব ক্লায়েন্টে LEAVE (group exit)
       2. সব ক্লায়েন্টে OPEN + SIZE + RECRUIT (new group)
+    auto_running=False হলে loop pause করে, thread exit হয় না।
     """
     global auto_running
     print(f"{Y}⏰ Auto Group Cycle started (every {AUTO_INTERVAL}s: EXIT → RECREATE){RS}")
 
-    while auto_running:
+    while True:
+        if not auto_running:
+            time.sleep(2)
+            continue
         try:
             with connected_clients_lock:
                 clients = list(connected_clients.values())
@@ -445,12 +449,18 @@ class FF_CLient():
                     print(f"{G}✅ Online: {self.id} (Total: {len(connected_clients)}){RS}")
         except Exception as e:
             print(f"{R}❌ Online error {self.id}: {e}{RS}")
+            with connected_clients_lock:
+                connected_clients.pop(self.id, None)
+            if self.running:
+                time.sleep(5)
+                threading.Thread(target=self.Get_FiNal_ToKen_0115, daemon=True).start()
             return
         while self.running:
             try:
                 self.CliEnts2.settimeout(30)
                 self.DaTa2 = self.CliEnts2.recv(99999)
-                if not self.DaTa2: break
+                if not self.DaTa2:
+                    break
 
                 # ---------- TERMINAL: SHOW RECV ----------
                 log_recv(self.id, self.DaTa2)
@@ -458,10 +468,19 @@ class FF_CLient():
                 if '0500' in self.DaTa2.hex()[0:4] and len(self.DaTa2.hex()) > 30:
                     self.packet = json.loads(DeCode_PackEt(f'08{self.DaTa2.hex().split("08",1)[1]}'))
                     self.AutH = self.packet['5']['data']['7']['data']
-            except socket.timeout: continue
+            except socket.timeout:
+                continue
             except Exception as e:
                 print(f"{R}[RECV err {self.id}] {e}{RS}")
                 break
+
+        # CliEnts2 socket মরে গেছে — cleanup করে fresh login
+        with connected_clients_lock:
+            connected_clients.pop(self.id, None)
+        print(f"{Y}⚠️  Reconnecting CliEnts2: {self.id}{RS}")
+        if self.running:
+            time.sleep(5)
+            threading.Thread(target=self.Get_FiNal_ToKen_0115, daemon=True).start()
 
     def Connect_SerVer(self, Token, tok, host, port, key, iv, host2, port2):
         self.AutH_ToKen_0115 = tok
@@ -483,13 +502,17 @@ class FF_CLient():
             try:
                 self.CliEnts.settimeout(30)
                 self.DaTa = self.CliEnts.recv(1024)
-                if not self.DaTa: break
+                if not self.DaTa:
+                    break
                 log_recv(self.id + ":c1", self.DaTa)
-            except socket.timeout: continue
-            except Exception: break
-        if self.running:
-            time.sleep(2)
-            self.Connect_SerVer(Token, tok, host, port, key, iv, host2, port2)
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+        # CliEnts (c1) socket মরে গেছে — এখানে reconnect করার দরকার নেই,
+        # Connect_SerVer_OnLine-এর নিজস্ব reconnect path আছে। শুধু cleanup।
+        with connected_clients_lock:
+            connected_clients.pop(self.id, None)
 
     def GeT_Key_Iv(self, serialized_data):
         my_message = xKEys.MyMessage()
@@ -674,12 +697,13 @@ class FF_CLient():
 
 # ==================== RUNNERS ====================
 def start_account(account):
-    try:
-        FF_CLient(account['id'], account['password'])
-    except Exception as e:
-        print(f"{R}❌ Login fail {account['id']}: {e}{RS}")
-        time.sleep(3)
-        start_account(account)
+    while True:
+        try:
+            FF_CLient(account['id'], account['password'])
+            break
+        except Exception as e:
+            print(f"{R}❌ Login fail {account['id']}: {e}{RS}")
+            time.sleep(5)
 
 
 def run_accounts():
@@ -890,8 +914,18 @@ def api_upload_accs():
     if not f.filename.endswith('.txt'): return jsonify({'success': False, 'message': 'Only .txt'}), 400
     try:
         content = f.read().decode('utf-8')
-        with open('accs.txt', 'w', encoding='utf-8') as fp: fp.write(content)
+        with open('accs.txt', 'w', encoding='utf-8') as fp:
+            fp.write(content)
         global ACCOUNTS
+        # পুরনো connected clients বন্ধ করে দাও
+        with connected_clients_lock:
+            for uid in list(connected_clients.keys()):
+                try:
+                    connected_clients[uid].stop()
+                except Exception:
+                    pass
+            connected_clients.clear()
+        time.sleep(1)
         ACCOUNTS = load_accounts('accs.txt')
         Thread(target=run_accounts, daemon=True).start()
         return jsonify({'success': True, 'message': f'Uploaded {len(ACCOUNTS)} accounts. Logging in...', 'total': len(ACCOUNTS)})
@@ -905,6 +939,7 @@ def health(): return jsonify({'status': 'ok', 'connected': len(connected_clients
 
 # ==================== MAIN ====================
 def main():
+    port = int(os.environ.get("PORT", 8080))
     print(f"""
     {C}{BOLD}
     ╔══════════════════════════════════════════════════════════════════════╗
@@ -916,31 +951,38 @@ def main():
     ║        STEP 3: Extra World Recruit                                   ║
     ║                                                                      ║
     ║     🖥️  সব ডিটেক্ট করা জিনিস টার্মিনালে দেখাবে                       ║
-    ║     🌐 Web Panel: http://127.0.0.1:8080                             ║
-    ║     🔑 Admin Pass: {ADMIN_PASSWORD}                                          ║
+    ║     🌐 Web Panel: http://0.0.0.0:{port}                              ║
+    ║     🔑 Admin Pass: [env: PANEL_PASSWORD]                             ║
     ╚══════════════════════════════════════════════════════════════════════╝
     {RS}
     """)
 
-    Thread(target=run_accounts, daemon=True).start()
+    # Railway-তে accs.txt না থাকলে খালি file তৈরি করে অপেক্ষা করে
+    if not os.path.exists("accs.txt") or os.path.getsize("accs.txt") == 0:
+        print(f"{Y}⚠️  accs.txt not found or empty. Upload via web panel.{RS}")
+    else:
+        Thread(target=run_accounts, daemon=True).start()
 
-    print(f"{Y}⏳ Waiting for accounts...{RS}")
-    waited = 0
-    while waited < 60:
-        with connected_clients_lock:
-            count = len(connected_clients)
-        if count > 0:
-            print(f"{G}✅ {count} accounts connected{RS}")
-            break
-        time.sleep(2); waited += 2
+        print(f"{Y}⏳ Waiting for accounts to connect...{RS}")
+        waited = 0
+        while waited < 90:
+            with connected_clients_lock:
+                count = len(connected_clients)
+            if count > 0:
+                print(f"{G}✅ {count} accounts connected{RS}")
+                break
+            time.sleep(2)
+            waited += 2
 
-    time.sleep(3)
-    create_group_with_all_accounts()
+        if waited >= 90:
+            print(f"{Y}⚠️  No accounts connected after 90s — continuing anyway{RS}")
 
-    # 🔄 Auto cycle (10s) — EXIT → RECREATE → RECRUIT
+        time.sleep(3)
+        create_group_with_all_accounts()
+
+    # 🔄 Auto cycle thread — always starts, pauses internally if no clients
     Thread(target=auto_group_cycle_loop, daemon=True).start()
 
-    port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
 
 
