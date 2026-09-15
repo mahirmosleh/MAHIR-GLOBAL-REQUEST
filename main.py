@@ -743,7 +743,8 @@ class FF_CLient():
         self.password = password
         self.key = None
         self.iv = None
-        self.running = True        self._reconnect_attempts = 0
+        self.running = True
+        self._reconnect_attempts = 0
         self.Get_FiNal_ToKen_0115()
 
     def Connect_SerVer_OnLine(self, Token, tok, host, port, key, iv, host2, port2):
