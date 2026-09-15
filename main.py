@@ -16,8 +16,8 @@ from xC4 import *
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-ADMIN_PASSWORD = os.environ.get("PANEL_PASSWORD", "mahir2024")
-SECRET_KEY = os.environ.get("SECRET_KEY", "mahir_group_secret_2024")
+ADMIN_PASSWORD = "MAHIR"
+SECRET_KEY = "mahir_group_secret_2024"
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
@@ -25,11 +25,58 @@ app.secret_key = SECRET_KEY
 connected_clients = {}
 connected_clients_lock = threading.Lock()
 
-# অটো লুপ কনফিগ
-AUTO_INTERVAL = 10  # ১০ সেকেন্ড
+# গ্লোবাল কনফিগ
+AUTO_INTERVAL = 10              # গ্রুপ সাইকেল ১০ সেকেন্ড
+RESTART_INTERVAL = 5 * 60       # সব account restart প্রতি ৫ মিনিট
+RECONNECT_CHECK_INTERVAL = 5    # dead client check প্রতি ৫ সেকেন্ড
+HELP_COOLDOWN = 30              # /help এর cooldown (sec)
+
 auto_running = True
+help_cooldown = {}              # { uid: last_time }
+help_cooldown_lock = threading.Lock()
 
 C = "\033[96m"; G = "\033[92m"; Y = "\033[93m"; R = "\033[91m"; RS = "\033[0m"; BOLD = "\033[1m"
+
+# ==================== HELP MESSAGE ====================
+HELP_MESSAGE = """╔══════════════════════════╗
+   🎯 MAHIR GROUP BOT 🎯
+╚══════════════════════════╝
+
+👋 হ্যালো! আমি MAHIR GROUP BOT।
+এই গ্রুপে আপনাকে স্বাগতম ✨
+
+📌 গ্রুপ নিয়মাবলী:
+ ├─ 🚫 স্প্যাম করবেন না
+ ├─ 🤝 সবাইকে সম্মান করুন
+ ├─ 📛 গালাগালি নিষিদ্ধ
+ └─ 🎮 শুধু গেম রিলেটেড কথা
+
+💡 কমান্ড:
+ ├─ /help  → এই মেসেজ
+ ├─ /info  → বট ইনফো
+ └─ /rules → গ্রুপ রুলস
+
+🔥 MAHIR GROUP ─ Always Active 24/7 🔥"""
+
+INFO_MESSAGE = """🤖 MAHIR GROUP BOT INFO
+━━━━━━━━━━━━━━━━━━━━
+▸ Name   : MAHIR BOT
+▸ Version: v4.0
+▸ Status : 🟢 Online 24/7
+▸ Owner  : MAHIR GROUP
+━━━━━━━━━━━━━━━━━━━━
+💬 Type /help for commands"""
+
+RULES_MESSAGE = """📜 MAHIR GROUP RULES
+━━━━━━━━━━━━━━━━━━━━
+1️⃣ স্প্যাম করা যাবে না
+2️⃣ গালাগালি সম্পূর্ণ নিষিদ্ধ
+3️⃣ সবাইকে সম্মান করুন
+4️⃣ অ্যাডভার্টাইজমেন্ট নিষিদ্ধ
+5️⃣ গেম রিলেটেড টপিক চলবে
+6️⃣ অ্যাডমিনের সিদ্ধান্ত চূড়ান্ত
+━━━━━━━━━━━━━━━━━━━━
+⚠️ নিয়ম ভাঙলে kick/ban 🚫"""
 
 # ==================== LIVE UPDATE ====================
 def AuToUpDaTE():
@@ -80,10 +127,13 @@ def load_accounts(filename="accs.txt"):
 
 ACCOUNTS = load_accounts("accs.txt")
 
+# গ্লোবাল অ্যাকাউন্ট রেজিস্ট্রি
+account_objects = {}   # uid -> FF_CLient instance
+account_lock = threading.Lock()
+
 # ==================== PACKET BUILDERS ====================
 
 def MAHIR_World_Recruit_Packet(target_id, key, iv):
-    """World Recruit Packet - FULLY SYNC"""
     try:
         fields = {
             1: 66,
@@ -112,7 +162,6 @@ def MAHIR_World_Recruit_Packet(target_id, key, iv):
 
 
 def cHSq22(bot_uid, K, V, region):
-    """Set squad team size - FULLY SYNC"""
     try:
         fields = {
             1: 17,
@@ -146,7 +195,6 @@ def cHSq22(bot_uid, K, V, region):
 
 
 def OpEnSq(K, V, region, version):
-    """Open Squad (Group Create) - FULLY SYNC"""
     try:
         fields = {
             1: 1,
@@ -201,10 +249,6 @@ def OpEnSq(K, V, region, version):
 
 
 def LeAvEsQ(K, V, region="BD"):
-    """
-    Squad/Group থেকে Exit করার প্যাকেট।
-    field 1 = 2 (leave), field 2 = {1: 1}
-    """
     try:
         fields = {
             1: 2,
@@ -234,12 +278,10 @@ def LeAvEsQ(K, V, region="BD"):
 
 # ==================== TERMINAL LOG HELPERS ====================
 def log_recv(client_id, raw_bytes):
-    """recv করা ডাটা টার্মিনালে দেখায়"""
     try:
         if not raw_bytes:
             return
         hex_str = raw_bytes.hex()
-        # প্রথম 4 byte packet type
         ptype = hex_str[:4] if len(hex_str) >= 4 else "????"
         preview = hex_str[:60] + ("..." if len(hex_str) > 60 else "")
         print(f"{C}[RECV {client_id}]{RS} type={ptype} len={len(raw_bytes)} data={preview}")
@@ -248,7 +290,6 @@ def log_recv(client_id, raw_bytes):
 
 
 def log_send(client_id, label, raw_bytes):
-    """send করা প্যাকেট টার্মিনালে দেখায়"""
     if raw_bytes is None:
         print(f"{R}[SEND {client_id}] {label} FAILED (None){RS}")
         return
@@ -258,28 +299,8 @@ def log_send(client_id, label, raw_bytes):
     print(f"{G}[SEND {client_id}]{RS} {label} type={ptype} len={len(raw_bytes)} data={preview}")
 
 
-def log_status(client_id, status_dict, label="STATUS"):
-    """status dict সুন্দরভাবে প্রিন্ট করে"""
-    try:
-        if not status_dict:
-            print(f"{Y}[{label} {client_id}] (empty){RS}")
-            return
-        keys = ["status", "mode", "squad_owner", "squad_size", "time_playing", "room_uid", "players"]
-        parts = []
-        for k in keys:
-            if k in status_dict and status_dict[k]:
-                parts.append(f"{k}={status_dict[k]}")
-        if parts:
-            print(f"{C}[{label} {client_id}]{RS} " + " | ".join(parts))
-        else:
-            print(f"{C}[{label} {client_id}]{RS} {status_dict}")
-    except Exception as e:
-        print(f"{R}[{label} error] {e}{RS}")
-
-
 # ==================== GROUP CREATE / EXIT LOGIC ====================
 def exit_group_on_client(client, region="BD"):
-    """ক্লায়েন্ট থেকে group/squad leave করে"""
     try:
         if not hasattr(client, 'CliEnts2') or not client.key:
             return False, "no socket"
@@ -294,12 +315,10 @@ def exit_group_on_client(client, region="BD"):
 
 
 def create_group_on_client(client, region="BD"):
-    """একটা ক্লায়েন্টে group create করে (Open + Size + Recruit)"""
     try:
         if not hasattr(client, 'CliEnts2') or not client.key:
             return False, "no socket"
 
-        # Step 1: Open Squad
         pkt_open = OpEnSq(client.key, client.iv, region, FREEFIRE_VERSION_NAME)
         if pkt_open:
             client.CliEnts2.send(pkt_open)
@@ -308,7 +327,6 @@ def create_group_on_client(client, region="BD"):
         else:
             return False, "OpEnSq failed"
 
-        # Step 2: Squad Size
         pkt_size = cHSq22(int(client.id), client.key, client.iv, region)
         if pkt_size:
             client.CliEnts2.send(pkt_size)
@@ -317,7 +335,6 @@ def create_group_on_client(client, region="BD"):
         else:
             return False, "cHSq22 failed"
 
-        # Step 3: World Recruit
         pkt_recruit = MAHIR_World_Recruit_Packet(int(client.id), client.key, client.iv)
         if pkt_recruit:
             client.CliEnts2.send(pkt_recruit)
@@ -356,19 +373,10 @@ def create_group_with_all_accounts():
 
 # ==================== AUTO LOOP (10s) ====================
 def auto_group_cycle_loop():
-    """
-    প্রতি ১০ সেকেন্ডে:
-      1. সব ক্লায়েন্টে LEAVE (group exit)
-      2. সব ক্লায়েন্টে OPEN + SIZE + RECRUIT (new group)
-    auto_running=False হলে loop pause করে, thread exit হয় না।
-    """
     global auto_running
     print(f"{Y}⏰ Auto Group Cycle started (every {AUTO_INTERVAL}s: EXIT → RECREATE){RS}")
 
-    while True:
-        if not auto_running:
-            time.sleep(2)
-            continue
+    while auto_running:
         try:
             with connected_clients_lock:
                 clients = list(connected_clients.values())
@@ -379,7 +387,6 @@ def auto_group_cycle_loop():
             print(f"\n{C}{'━'*60}{RS}")
             print(f"{Y}[{datetime.now().strftime('%H:%M:%S')}] 🔄 AUTO CYCLE START ({len(clients)} clients){RS}")
 
-            # ---------- STEP 1: EXIT ----------
             print(f"{Y}➡️  STEP 1: Leaving old group...{RS}")
             exit_ok = 0
             for client in clients:
@@ -390,7 +397,6 @@ def auto_group_cycle_loop():
 
             time.sleep(0.5)
 
-            # ---------- STEP 2: NEW GROUP ----------
             print(f"{Y}➡️  STEP 2: Creating new group...{RS}")
             success = 0
             for client in clients:
@@ -402,7 +408,6 @@ def auto_group_cycle_loop():
                 time.sleep(0.1)
             print(f"{G}   ✅ Group recreated: {success}/{len(clients)}{RS}")
 
-            # ---------- STEP 3: WORLD RECRUIT (again) ----------
             print(f"{Y}➡️  STEP 3: Extra World Recruit...{RS}")
             recruit_ok = 0
             for client in clients:
@@ -420,12 +425,315 @@ def auto_group_cycle_loop():
             print(f"{G}   ✅ Recruit sent: {recruit_ok}/{len(clients)}{RS}")
             print(f"{C}{'━'*60}{RS}\n")
 
-            # ---------- WAIT ----------
             time.sleep(AUTO_INTERVAL)
 
         except Exception as e:
             print(f"{R}❌ Auto cycle error: {e}{RS}")
             time.sleep(5)
+
+
+# ==================== AUTO RESTART (EVERY 5 MIN) ====================
+def auto_restart_all_loop():
+    print(f"{Y}🔁 Auto Restart Loop started (every {RESTART_INTERVAL}s = 5 min){RS}")
+    while True:
+        try:
+            time.sleep(RESTART_INTERVAL)
+
+            print(f"\n{C}{'='*60}{RS}")
+            print(f"{Y}[{datetime.now().strftime('%H:%M:%S')}] 🔁 AUTO RESTART ALL ACCOUNTS{RS}")
+            print(f"{C}{'='*60}{RS}")
+
+            with account_lock:
+                uids = list(account_objects.keys())
+
+            if not uids:
+                print(f"{Y}   (no accounts to restart){RS}")
+                continue
+
+            for uid in uids:
+                try:
+                    with account_lock:
+                        obj = account_objects.get(uid)
+                    if obj:
+                        obj.stop()
+                except Exception as e:
+                    print(f"{R}   ❌ stop {uid}: {e}{RS}")
+
+            with connected_clients_lock:
+                connected_clients.clear()
+            with account_lock:
+                account_objects.clear()
+
+            print(f"{G}   ✅ Stopped {len(uids)} accounts. Reconnecting...{RS}")
+            time.sleep(2)
+
+            for acc in ACCOUNTS:
+                t = threading.Thread(target=start_account, args=(acc,), daemon=True)
+                t.start()
+                time.sleep(0.5)
+
+            print(f"{G}   ✅ Restart triggered for {len(ACCOUNTS)} accounts{RS}\n")
+
+        except Exception as e:
+            print(f"{R}❌ Auto restart error: {e}{RS}")
+            time.sleep(10)
+
+
+# ==================== AUTO RECONNECT DEAD CLIENTS ====================
+def auto_reconnect_dead_loop():
+    print(f"{Y}🩺 Auto Reconnect Dead Loop started (every {RECONNECT_CHECK_INTERVAL}s){RS}")
+    while True:
+        try:
+            time.sleep(RECONNECT_CHECK_INTERVAL)
+
+            with account_lock:
+                current_uids = set(account_objects.keys())
+
+            with connected_clients_lock:
+                connected_uids = set(connected_clients.keys())
+
+            all_uids = set(str(a['id']) for a in ACCOUNTS)
+            dead_uids = all_uids - connected_uids
+
+            for uid in list(current_uids):
+                obj = account_objects.get(uid)
+                if obj is None:
+                    dead_uids.add(uid)
+                    continue
+                if not getattr(obj, 'running', False):
+                    dead_uids.add(uid)
+                    continue
+                sock2 = getattr(obj, 'CliEnts2', None)
+                if sock2 is None:
+                    dead_uids.add(uid)
+                    continue
+                try:
+                    sock2.setblocking(False)
+                    try:
+                        peek = sock2.recv(1, socket.MSG_PEEK)
+                        if peek == b'':
+                            dead_uids.add(uid)
+                    except BlockingIOError:
+                        pass
+                    except (ConnectionResetError, OSError):
+                        dead_uids.add(uid)
+                    finally:
+                        try: sock2.setblocking(True)
+                        except: pass
+                except Exception:
+                    dead_uids.add(uid)
+
+            if not dead_uids:
+                continue
+
+            print(f"{Y}🩺 Reconnect check: {len(dead_uids)} dead → restarting{RS}")
+
+            for uid in dead_uids:
+                with account_lock:
+                    old = account_objects.pop(uid, None)
+                if old:
+                    try: old.stop()
+                    except: pass
+
+                with connected_clients_lock:
+                    connected_clients.pop(uid, None)
+
+                acc = next((a for a in ACCOUNTS if str(a['id']) == str(uid)), None)
+                if acc:
+                    print(f"{G}   ♻️ Reconnecting {uid}...{RS}")
+                    t = threading.Thread(target=start_account, args=(acc,), daemon=True)
+                    t.start()
+
+        except Exception as e:
+            print(f"{R}❌ Reconnect loop error: {e}{RS}")
+            time.sleep(5)
+
+
+# ==================== CHAT / HELP / EXTRA ACTIONS ====================
+def send_squad_chat_on_client(client, message, chat_type=1, squad_id="0"):
+    try:
+        if not hasattr(client, 'CliEnts2') or not client.key:
+            return False, "no socket"
+        pkt = ChaT_sQ(str(message), int(chat_type), int(client.id), str(squad_id), client.key, client.iv)
+        if pkt:
+            client.CliEnts2.send(pkt)
+            log_send(client.id, "SQUAD_CHAT", pkt)
+            return True, "sent"
+        return False, "ChaT_sQ failed"
+    except Exception as e:
+        return False, str(e)
+
+
+def send_global_chat_on_client(client, message):
+    try:
+        if not hasattr(client, 'CliEnts2') or not client.key:
+            return False, "no socket"
+        pkt = GLobaL(str(message), client.key, client.iv)
+        if pkt:
+            client.CliEnts2.send(pkt)
+            log_send(client.id, "GLOBAL_CHAT", pkt)
+            return True, "sent"
+        return False, "GLobaL failed"
+    except Exception as e:
+        return False, str(e)
+
+
+def send_craftland_share_on_client(client, target_id, map_code, chat_type=5):
+    try:
+        if not hasattr(client, 'CliEnts2') or not client.key:
+            return False, "no socket"
+        ok = send_craftland_share_sync(
+            client.CliEnts2, int(client.id), int(target_id),
+            int(chat_type), str(map_code), client.key, client.iv
+        )
+        if ok:
+            print(f"{G}[SEND {client.id}] CRAFTLAND_SHARE map={map_code}{RS}")
+            return True, "sent"
+        return False, "craftland failed"
+    except Exception as e:
+        return False, str(e)
+
+
+def send_refresh_on_client(client):
+    try:
+        if not hasattr(client, 'CliEnts2') or not client.key:
+            return False, "no socket"
+        pkt = RefLeSh(client.key, client.iv)
+        if pkt:
+            client.CliEnts2.send(pkt)
+            log_send(client.id, "REFRESH", pkt)
+            return True, "sent"
+        return False, "RefLeSh failed"
+    except Exception as e:
+        return False, str(e)
+
+
+def broadcast_squad_chat(message, chat_type=1, squad_id="0"):
+    with connected_clients_lock:
+        clients = list(connected_clients.values())
+    ok = 0
+    for c in clients:
+        r, _ = send_squad_chat_on_client(c, message, chat_type, squad_id)
+        if r: ok += 1
+        time.sleep(0.05)
+    return ok, len(clients)
+
+
+def broadcast_global_chat(message):
+    with connected_clients_lock:
+        clients = list(connected_clients.values())
+    ok = 0
+    for c in clients:
+        r, _ = send_global_chat_on_client(c, message)
+        if r: ok += 1
+        time.sleep(0.05)
+    return ok, len(clients)
+
+
+# ==================== HELP COMMAND HANDLER ====================
+def _help_cooldown_ok(uid):
+    """একজন user ৩০ সেকেন্ডে একবার /help পাবে"""
+    if not uid:
+        return True
+    with help_cooldown_lock:
+        now = time.time()
+        last = help_cooldown.get(str(uid), 0)
+        if now - last < HELP_COOLDOWN:
+            return False
+        help_cooldown[str(uid)] = now
+        return True
+
+
+def _send_group_message(client, text):
+    """গ্রুপে মেসেজ পাঠায়"""
+    try:
+        if not client.key or not client.iv:
+            return False
+        if not hasattr(client, 'CliEnts2'):
+            return False
+        pkt = ChaT_sQ(str(text), 1, int(client.id), "0", client.key, client.iv)
+        if pkt:
+            client.CliEnts2.send(pkt)
+            log_send(client.id, "GROUP_MSG", pkt)
+            return True
+    except Exception as e:
+        print(f"{R}[SEND_MSG {getattr(client,'id','?')}] {e}{RS}")
+    return False
+
+
+def _handle_help_command(client, raw_bytes):
+    """
+    recv packet এর ভিতরে '/help', '/info', '/rules' খুঁজে reply দেয়
+    """
+    try:
+        hex_str = raw_bytes.hex()
+
+        # খুব ছোট packet skip
+        if len(hex_str) < 40:
+            return
+
+        # chat packet type 1215 বা 0c দিয়ে শুরু হলে বেশি সম্ভাবনা
+        # কিন্তু নিরাপদ পদ্ধতি: hex থেকে string decode করে keyword খুঁজি
+        try:
+            decoded = bytes.fromhex(hex_str).decode('utf-8', errors='ignore')
+        except Exception:
+            return
+
+        low = decoded.lower()
+
+        # /help /info /rules command খুঁজি
+        want_help = '/help' in low or low.strip().endswith(' help')
+        want_info = '/info' in low
+        want_rules = '/rules' in low
+
+        if not (want_help or want_info or want_rules):
+            return
+
+        # sender UID বের করার চেষ্টা (protobuf parse)
+        sender_uid = None
+        try:
+            if '08' in hex_str:
+                parsed = DeCode_PackEt(f'08{hex_str.split("08",1)[1]}')
+                if parsed:
+                    obj = json.loads(parsed)
+                    # 여러 structure try
+                    for path in [
+                        ('5','data','1','data'),
+                        ('5','data','3','data','31','data'),
+                        ('5','data','31','data'),
+                    ]:
+                        cur = obj
+                        ok = True
+                        for p in path:
+                            if isinstance(cur, dict) and p in cur:
+                                cur = cur[p]
+                            else:
+                                ok = False
+                                break
+                        if ok and isinstance(cur, (str, int)):
+                            sender_uid = str(cur)
+                            break
+        except Exception:
+            pass
+
+        # cooldown check (শুধু help/info/rules এর জন্য)
+        if not _help_cooldown_ok(sender_uid):
+            print(f"{Y}[HELP {client.id}] cooldown for {sender_uid}{RS}")
+            return
+
+        # reply পাঠাই
+        if want_help:
+            print(f"{G}[HELP {client.id}] ➜ /help detected (sender={sender_uid}){RS}")
+            _send_group_message(client, HELP_MESSAGE)
+        elif want_info:
+            print(f"{G}[HELP {client.id}] ➜ /info detected{RS}")
+            _send_group_message(client, INFO_MESSAGE)
+        elif want_rules:
+            print(f"{G}[HELP {client.id}] ➜ /rules detected{RS}")
+            _send_group_message(client, RULES_MESSAGE)
+
+    except Exception as e:
+        print(f"{R}[HELP parse error {getattr(client,'id','?')}] {e}{RS}")
 
 
 # ==================== FF CLIENT ====================
@@ -435,7 +743,7 @@ class FF_CLient():
         self.password = password
         self.key = None
         self.iv = None
-        self.running = True
+        self.running = True        self._reconnect_attempts = 0
         self.Get_FiNal_ToKen_0115()
 
     def Connect_SerVer_OnLine(self, Token, tok, host, port, key, iv, host2, port2):
@@ -449,38 +757,34 @@ class FF_CLient():
                     print(f"{G}✅ Online: {self.id} (Total: {len(connected_clients)}){RS}")
         except Exception as e:
             print(f"{R}❌ Online error {self.id}: {e}{RS}")
-            with connected_clients_lock:
-                connected_clients.pop(self.id, None)
-            if self.running:
-                time.sleep(5)
-                threading.Thread(target=self.Get_FiNal_ToKen_0115, daemon=True).start()
+            self._schedule_reconnect()
             return
         while self.running:
             try:
                 self.CliEnts2.settimeout(30)
                 self.DaTa2 = self.CliEnts2.recv(99999)
                 if not self.DaTa2:
+                    print(f"{Y}⚠️ Socket2 closed: {self.id}{RS}")
                     break
 
-                # ---------- TERMINAL: SHOW RECV ----------
                 log_recv(self.id, self.DaTa2)
+
+                # 🔥 /help command detect
+                try:
+                    _handle_help_command(self, self.DaTa2)
+                except Exception:
+                    pass
 
                 if '0500' in self.DaTa2.hex()[0:4] and len(self.DaTa2.hex()) > 30:
                     self.packet = json.loads(DeCode_PackEt(f'08{self.DaTa2.hex().split("08",1)[1]}'))
                     self.AutH = self.packet['5']['data']['7']['data']
-            except socket.timeout:
-                continue
+            except socket.timeout: continue
             except Exception as e:
                 print(f"{R}[RECV err {self.id}] {e}{RS}")
                 break
 
-        # CliEnts2 socket মরে গেছে — cleanup করে fresh login
-        with connected_clients_lock:
-            connected_clients.pop(self.id, None)
-        print(f"{Y}⚠️  Reconnecting CliEnts2: {self.id}{RS}")
         if self.running:
-            time.sleep(5)
-            threading.Thread(target=self.Get_FiNal_ToKen_0115, daemon=True).start()
+            self._schedule_reconnect()
 
     def Connect_SerVer(self, Token, tok, host, port, key, iv, host2, port2):
         self.AutH_ToKen_0115 = tok
@@ -491,6 +795,7 @@ class FF_CLient():
             threading.Thread(target=self.Connect_SerVer_OnLine, args=(Token, tok, host, port, key, iv, host2, port2), daemon=True).start()
         except Exception as e:
             print(f"{R}❌ Conn error {self.id}: {e}{RS}")
+            self._schedule_reconnect()
             return
         self.key = key
         self.iv = iv
@@ -503,16 +808,49 @@ class FF_CLient():
                 self.CliEnts.settimeout(30)
                 self.DaTa = self.CliEnts.recv(1024)
                 if not self.DaTa:
+                    print(f"{Y}⚠️ Socket1 closed: {self.id}{RS}")
                     break
                 log_recv(self.id + ":c1", self.DaTa)
-            except socket.timeout:
-                continue
-            except Exception:
-                break
-        # CliEnts (c1) socket মরে গেছে — এখানে reconnect করার দরকার নেই,
-        # Connect_SerVer_OnLine-এর নিজস্ব reconnect path আছে। শুধু cleanup।
+                # Socket1 থেকেও help detect করা যায়
+                try:
+                    _handle_help_command(self, self.DaTa)
+                except Exception:
+                    pass
+            except socket.timeout: continue
+            except Exception: break
+
+        if self.running:
+            self._schedule_reconnect()
+
+    def _schedule_reconnect(self):
+        if not self.running:
+            return
+        self._reconnect_attempts += 1
+        wait = min(5 + self._reconnect_attempts * 2, 30)
+        print(f"{Y}♻️ Scheduling reconnect for {self.id} in {wait}s (attempt #{self._reconnect_attempts}){RS}")
+        t = threading.Timer(wait, self._do_reconnect)
+        t.daemon = True
+        t.start()
+
+    def _do_reconnect(self):
+        if not self.running:
+            return
+        try:
+            if hasattr(self, 'CliEnts'):
+                try: self.CliEnts.close()
+                except: pass
+            if hasattr(self, 'CliEnts2'):
+                try: self.CliEnts2.close()
+                except: pass
+        except: pass
         with connected_clients_lock:
             connected_clients.pop(self.id, None)
+        with account_lock:
+            account_objects.pop(self.id, None)
+
+        print(f"{G}🔄 Reconnecting {self.id}...{RS}")
+        acc = {'id': self.id, 'password': self.password}
+        threading.Thread(target=start_account, args=(acc,), daemon=True).start()
 
     def GeT_Key_Iv(self, serialized_data):
         my_message = xKEys.MyMessage()
@@ -697,13 +1035,17 @@ class FF_CLient():
 
 # ==================== RUNNERS ====================
 def start_account(account):
-    while True:
-        try:
-            FF_CLient(account['id'], account['password'])
-            break
-        except Exception as e:
-            print(f"{R}❌ Login fail {account['id']}: {e}{RS}")
-            time.sleep(5)
+    uid = str(account['id'])
+    try:
+        obj = FF_CLient(account['id'], account['password'])
+        with account_lock:
+            account_objects[uid] = obj
+    except Exception as e:
+        print(f"{R}❌ Login fail {uid}: {e}{RS}")
+        time.sleep(3)
+        t = threading.Timer(3, start_account, args=(account,))
+        t.daemon = True
+        t.start()
 
 
 def run_accounts():
@@ -717,10 +1059,12 @@ def run_accounts():
 def reset_accounts():
     global ACCOUNTS
     print(f"{Y}🔄 Reset...{RS}")
-    with connected_clients_lock:
-        for uid in list(connected_clients.keys()):
-            try: connected_clients[uid].stop()
+    with account_lock:
+        for uid in list(account_objects.keys()):
+            try: account_objects[uid].stop()
             except: pass
+        account_objects.clear()
+    with connected_clients_lock:
         connected_clients.clear()
     time.sleep(1)
     ACCOUNTS = load_accounts("accs.txt")
@@ -774,11 +1118,14 @@ body{background:linear-gradient(135deg,#060417,#0e0b30,#130a24);min-height:100vh
 .upload-area.dragover{border-color:#ff007f;background:rgba(255,0,127,0.05);}
 .upload-area p{font-size:0.85rem;color:rgba(255,255,255,0.4);margin-top:8px;}
 .btn-sm{padding:6px 12px;font-size:0.75rem;}
+.chat-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;}
+.chat-row input, .chat-row select{flex:1;min-width:120px;padding:10px 14px;background:rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;outline:none;font-size:0.85rem;}
+.chat-row input:focus{border-color:#00d4ff;}
 </style></head><body>
 <div class="container">
 <div class="header">
 <div><div class="logo">🎯 MAHIR GROUP PANEL</div>
-<div style="color:rgba(255,255,255,0.3);font-size:0.8rem;">Auto every 10s: EXIT → RECREATE → RECRUIT</div></div>
+<div style="color:rgba(255,255,255,0.3);font-size:0.8rem;">Auto 10s Cycle • Auto 5min Restart • Auto Reconnect • /help Command</div></div>
 <div><a href="/logout" class="btn btn-outline btn-sm">LOGOUT</a></div>
 </div>
 <div class="stats">
@@ -791,7 +1138,36 @@ body{background:linear-gradient(135deg,#060417,#0e0b30,#130a24);min-height:100vh
 <button class="btn btn-primary" onclick="sendGroupNow()">🚀 Create Group Now</button>
 <button class="btn btn-warning" onclick="toggleAuto()" id="toggleBtn" style="background:linear-gradient(135deg,#ffaa00,#ff6600);color:#000;">⏸ Stop Auto</button>
 <button class="btn btn-success" onclick="resetAccounts()">🔄 Reset Accounts</button>
+<button class="btn btn-outline" onclick="restartAllNow()">♻️ Restart All Now</button>
 </div></div>
+
+<div class="card"><h3>💬 CHAT CONTROLS</h3>
+<div class="chat-row">
+<input type="text" id="chatMsg" placeholder="Enter message..." value="MAHIR GROUP 🔥">
+<select id="chatType">
+<option value="squad">Squad Chat</option>
+<option value="global">Global Chat</option>
+</select>
+<button class="btn btn-primary" onclick="sendChat()">📨 Send Chat</button>
+</div>
+<div class="chat-row" style="margin-top:10px;">
+<button class="btn btn-outline" onclick="sendHelpNow()">📖 Send /help Reply</button>
+<button class="btn btn-outline" onclick="sendInfoNow()">ℹ️ Send /info Reply</button>
+<button class="btn btn-outline" onclick="sendRulesNow()">📜 Send /rules Reply</button>
+</div></div>
+
+<div class="card"><h3>🎨 CRAFTLAND SHARE</h3>
+<div class="chat-row">
+<input type="text" id="craftMapCode" placeholder="Map Code (e.g. 12345)">
+<input type="text" id="craftTargetId" placeholder="Target UID">
+<button class="btn btn-primary" onclick="sendCraftland()">🗺️ Share Map</button>
+</div></div>
+
+<div class="card"><h3>🔄 EXTRA ACTIONS</h3>
+<div style="display:flex;gap:10px;flex-wrap:wrap;">
+<button class="btn btn-outline" onclick="sendRefresh()">♻️ Refresh All</button>
+</div></div>
+
 <div class="card"><h3>📁 UPLOAD accs.txt</h3>
 <div class="upload-area" id="uploadArea">
 <p>📁 Click or Drag & Drop accs.txt</p>
@@ -821,6 +1197,38 @@ function resetAccounts(){if(!confirm('⚠️ Reset all accounts?'))return;log('�
 if(d.success){toast('✅ '+d.message,'success');log('✅ '+d.message);}else toast('❌ '+d.message,'error');});}
 function toggleAuto(){fetch('/api/toggle-auto',{method:'POST'}).then(r=>r.json()).then(d=>{
 if(d.success){toast((d.auto?'▶️ ':'⏸ ')+d.message,'success');log((d.auto?'▶️ ':'⏸ ')+d.message);refreshStatus();}});}
+function restartAllNow(){if(!confirm('♻️ Restart ALL accounts now?'))return;log('♻️ Restarting all...');fetch('/api/restart-all',{method:'POST'}).then(r=>r.json()).then(d=>{
+if(d.success){toast('✅ '+d.message,'success');log('✅ '+d.message);}else toast('❌ '+d.message,'error');});}
+function sendHelpNow(){fetch('/api/send-help',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'help'})}).then(r=>r.json()).then(d=>{
+if(d.success){toast('✅ '+d.message,'success');log('📖 '+d.message);}else toast('❌ '+d.message,'error');});}
+function sendInfoNow(){fetch('/api/send-help',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'info'})}).then(r=>r.json()).then(d=>{
+if(d.success){toast('✅ '+d.message,'success');log('ℹ️ '+d.message);}else toast('❌ '+d.message,'error');});}
+function sendRulesNow(){fetch('/api/send-help',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'rules'})}).then(r=>r.json()).then(d=>{
+if(d.success){toast('✅ '+d.message,'success');log('📜 '+d.message);}else toast('❌ '+d.message,'error');});}
+function sendChat(){
+  const msg=document.getElementById('chatMsg').value;
+  const type=document.getElementById('chatType').value;
+  if(!msg){toast('❌ Enter message','error');return;}
+  log(`📨 Sending ${type} chat: ${msg}`);
+  fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg,type:type})})
+  .then(r=>r.json()).then(d=>{
+    if(d.success){toast('✅ '+d.message,'success');log('✅ '+d.message);}
+    else toast('❌ '+d.message,'error');
+  });
+}
+function sendCraftland(){
+  const code=document.getElementById('craftMapCode').value;
+  const tid=document.getElementById('craftTargetId').value;
+  if(!code||!tid){toast('❌ Map code & target UID required','error');return;}
+  fetch('/api/craftland',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({map_code:code,target_id:tid})})
+  .then(r=>r.json()).then(d=>{
+    if(d.success){toast('✅ '+d.message,'success');log('✅ '+d.message);}
+    else toast('❌ '+d.message,'error');
+  });
+}
+function sendRefresh(){fetch('/api/refresh',{method:'POST'}).then(r=>r.json()).then(d=>{
+  if(d.success){toast('✅ '+d.message,'success');log('✅ '+d.message);}
+  else toast('❌ '+d.message,'error');});}
 const ua=document.getElementById('uploadArea'),fi=document.getElementById('fileInput');
 ua.addEventListener('click',()=>fi.click());
 ua.addEventListener('dragover',e=>{e.preventDefault();ua.classList.add('dragover');});
@@ -906,6 +1314,110 @@ def api_toggle_auto():
                     'message': 'Auto cycle ' + ('started' if auto_running else 'stopped')})
 
 
+@app.route('/api/restart-all', methods=['POST'])
+@login_required
+def api_restart_all():
+    try:
+        with account_lock:
+            uids = list(account_objects.keys())
+        for uid in uids:
+            try:
+                with account_lock:
+                    obj = account_objects.get(uid)
+                if obj: obj.stop()
+            except: pass
+        with connected_clients_lock:
+            connected_clients.clear()
+        with account_lock:
+            account_objects.clear()
+        time.sleep(1)
+        run_accounts()
+        return jsonify({'success': True, 'message': f'Restart triggered for {len(ACCOUNTS)} accounts'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/send-help', methods=['POST'])
+@login_required
+def api_send_help():
+    """ম্যানুয়ালি গ্রুপে help/info/rules পাঠায়"""
+    try:
+        data = request.get_json() or {}
+        htype = (data.get('type') or 'help').lower()
+
+        if htype == 'help': text = HELP_MESSAGE
+        elif htype == 'info': text = INFO_MESSAGE
+        elif htype == 'rules': text = RULES_MESSAGE
+        else: return jsonify({'success': False, 'message': 'Unknown type'}), 400
+
+        with connected_clients_lock:
+            clients = list(connected_clients.values())
+        ok = 0
+        for c in clients:
+            if _send_group_message(c, text):
+                ok += 1
+            time.sleep(0.05)
+        return jsonify({'success': ok > 0, 'message': f'{htype} sent {ok}/{len(clients)}'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/chat', methods=['POST'])
+@login_required
+def api_chat():
+    try:
+        data = request.get_json() or {}
+        msg = data.get('message', '').strip()
+        ctype = data.get('type', 'squad')
+        if not msg:
+            return jsonify({'success': False, 'message': 'Empty message'}), 400
+        if ctype == 'global':
+            ok, total = broadcast_global_chat(msg)
+            return jsonify({'success': ok > 0, 'message': f'Global chat sent {ok}/{total}'})
+        else:
+            ok, total = broadcast_squad_chat(msg, chat_type=1, squad_id="0")
+            return jsonify({'success': ok > 0, 'message': f'Squad chat sent {ok}/{total}'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/craftland', methods=['POST'])
+@login_required
+def api_craftland():
+    try:
+        data = request.get_json() or {}
+        map_code = str(data.get('map_code', '')).strip()
+        target_id = str(data.get('target_id', '')).strip()
+        if not map_code or not target_id:
+            return jsonify({'success': False, 'message': 'map_code & target_id required'}), 400
+        with connected_clients_lock:
+            clients = list(connected_clients.values())
+        ok = 0
+        for c in clients:
+            r, _ = send_craftland_share_on_client(c, target_id, map_code)
+            if r: ok += 1
+            time.sleep(0.05)
+        return jsonify({'success': ok > 0, 'message': f'Craftland shared {ok}/{len(clients)}'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/refresh', methods=['POST'])
+@login_required
+def api_refresh():
+    try:
+        with connected_clients_lock:
+            clients = list(connected_clients.values())
+        ok = 0
+        for c in clients:
+            r, _ = send_refresh_on_client(c)
+            if r: ok += 1
+            time.sleep(0.05)
+        return jsonify({'success': ok > 0, 'message': f'Refresh sent {ok}/{len(clients)}'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 @app.route('/api/upload-accs', methods=['POST'])
 @login_required
 def api_upload_accs():
@@ -914,18 +1426,8 @@ def api_upload_accs():
     if not f.filename.endswith('.txt'): return jsonify({'success': False, 'message': 'Only .txt'}), 400
     try:
         content = f.read().decode('utf-8')
-        with open('accs.txt', 'w', encoding='utf-8') as fp:
-            fp.write(content)
+        with open('accs.txt', 'w', encoding='utf-8') as fp: fp.write(content)
         global ACCOUNTS
-        # পুরনো connected clients বন্ধ করে দাও
-        with connected_clients_lock:
-            for uid in list(connected_clients.keys()):
-                try:
-                    connected_clients[uid].stop()
-                except Exception:
-                    pass
-            connected_clients.clear()
-        time.sleep(1)
         ACCOUNTS = load_accounts('accs.txt')
         Thread(target=run_accounts, daemon=True).start()
         return jsonify({'success': True, 'message': f'Uploaded {len(ACCOUNTS)} accounts. Logging in...', 'total': len(ACCOUNTS)})
@@ -939,50 +1441,48 @@ def health(): return jsonify({'status': 'ok', 'connected': len(connected_clients
 
 # ==================== MAIN ====================
 def main():
-    port = int(os.environ.get("PORT", 8080))
     print(f"""
     {C}{BOLD}
     ╔══════════════════════════════════════════════════════════════════════╗
-    ║           🎯 MAHIR GROUP SYSTEM v3.0 (Auto Cycle 10s) 🎯             ║
+    ║   🎯 MAHIR GROUP SYSTEM v5.0 (Help + Restart + Reconnect) 🎯         ║
     ║                                                                      ║
-    ║     🔄 প্রতি ১০ সেকেন্ডে:                                            ║
-    ║        STEP 1: LEAVE (group exit)                                    ║
-    ║        STEP 2: OPEN + SIZE + RECRUIT (new group)                     ║
-    ║        STEP 3: Extra World Recruit                                   ║
+    ║     🔄 Auto Cycle: প্রতি ১০ সেকেন্ডে EXIT → RECREATE → RECRUIT       ║
+    ║     ♻️  Auto Restart: প্রতি ৫ মিনিটে সব account restart              ║
+    ║     🩺 Auto Reconnect: account বন্ধ হলে সাথে সাথে চালু               ║
+    ║     📖 /help Command: গ্রুপে কেউ /help লিখলে সুন্দর মেসেজ           ║
     ║                                                                      ║
-    ║     🖥️  সব ডিটেক্ট করা জিনিস টার্মিনালে দেখাবে                       ║
-    ║     🌐 Web Panel: http://0.0.0.0:{port}                              ║
-    ║     🔑 Admin Pass: [env: PANEL_PASSWORD]                             ║
+    ║     💬 Chat / Craftland / Refresh — xC4 থেকে                         ║
+    ║     🌐 Web Panel: http://127.0.0.1:8080                             ║
+    ║     🔑 Admin Pass: {ADMIN_PASSWORD}                                          ║
     ╚══════════════════════════════════════════════════════════════════════╝
     {RS}
     """)
 
-    # Railway-তে accs.txt না থাকলে খালি file তৈরি করে অপেক্ষা করে
-    if not os.path.exists("accs.txt") or os.path.getsize("accs.txt") == 0:
-        print(f"{Y}⚠️  accs.txt not found or empty. Upload via web panel.{RS}")
-    else:
-        Thread(target=run_accounts, daemon=True).start()
+    Thread(target=run_accounts, daemon=True).start()
 
-        print(f"{Y}⏳ Waiting for accounts to connect...{RS}")
-        waited = 0
-        while waited < 90:
-            with connected_clients_lock:
-                count = len(connected_clients)
-            if count > 0:
-                print(f"{G}✅ {count} accounts connected{RS}")
-                break
-            time.sleep(2)
-            waited += 2
+    print(f"{Y}⏳ Waiting for accounts...{RS}")
+    waited = 0
+    while waited < 60:
+        with connected_clients_lock:
+            count = len(connected_clients)
+        if count > 0:
+            print(f"{G}✅ {count} accounts connected{RS}")
+            break
+        time.sleep(2); waited += 2
 
-        if waited >= 90:
-            print(f"{Y}⚠️  No accounts connected after 90s — continuing anyway{RS}")
+    time.sleep(3)
+    create_group_with_all_accounts()
 
-        time.sleep(3)
-        create_group_with_all_accounts()
-
-    # 🔄 Auto cycle thread — always starts, pauses internally if no clients
+    # 🔄 Auto cycle (10s)
     Thread(target=auto_group_cycle_loop, daemon=True).start()
 
+    # ♻️  Auto restart every 5 min
+    Thread(target=auto_restart_all_loop, daemon=True).start()
+
+    # 🩺 Auto reconnect dead clients every 5 sec
+    Thread(target=auto_reconnect_dead_loop, daemon=True).start()
+
+    port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
 
 
